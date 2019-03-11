@@ -5,7 +5,6 @@ Main application script for tagging parts-of-speech and morphosyntactic tags. Ru
 from collections import Counter
 from _collections import defaultdict
 from evaluate_morphotags import Evaluator
-from sys import maxsize
 
 import collections
 import argparse
@@ -14,7 +13,7 @@ import pickle
 import logging
 import progressbar
 import os
-import dynet as dy
+import dynet_config
 import numpy as np
 
 import utils
@@ -28,7 +27,9 @@ POS_KEY = "POS"
 PADDING_CHAR = "<*>"
 
 DEFAULT_WORD_EMBEDDING_SIZE = 64
-DEFAULT_CHAR_EMBEDDING_SIZE = 20
+DEFAULT_CHAR_EMBEDDING_SIZE = 256
+
+normalized_words = collections.Counter()
 
 class LSTMTagger:
     '''
@@ -38,11 +39,11 @@ class LSTMTagger:
     https://github.com/clab/dynet_tutorial_examples/blob/master/tutorial_bilstm_tagger.py
     '''
 
-    def __init__(self, tagset_sizes, num_lstm_layers, hidden_dim, word_embeddings, no_we_update, use_char_rnn, charset_size, char_embedding_dim, att_props=None, vocab_size=None, word_embedding_dim=None):
+    def __init__(self, tagset_sizes, num_lstm_layers, hidden_dim, word_level_dim, no_we_update, use_char_rnn, charset_size, char_embedding_dim, use_elman_rnn, att_props=None, vocab_size=None, word_embedding_dim=None):
         '''
         :param tagset_sizes: dictionary of attribute_name:number_of_possible_tags
         :param num_lstm_layers: number of desired LSTM layers
-        :param hidden_dim: size of hidden dimension (same for all LSTM layers, including character-level)
+        :param hidden_dim: size of hidden dimension (same for all LSTM layers, including character-level). If tuple, the char level birnn will be asymmetric with (forward, backward)
         :param word_embeddings: pre-trained list of embeddings, assumes order by word ID (optional)
         :param no_we_update: if toggled, don't update embeddings
         :param use_char_rnn: use "char->tag" option, i.e. concatenate character-level LSTM outputs to word representations (and train underlying LSTM). Only 1-layer is supported.
@@ -54,72 +55,65 @@ class LSTMTagger:
         '''
         self.model = dy.Model()
         self.tagset_sizes = tagset_sizes
-        self.attributes = list(tagset_sizes.keys())
+        self.attributes = tagset_sizes.keys()
         self.we_update = not no_we_update
         if att_props is not None:
             self.att_props = defaultdict(float, {att:(1.0-p) for att,p in att_props.items()})
         else:
             self.att_props = None
 
-        if word_embeddings is not None: # Use pretrained embeddings
-            vocab_size = word_embeddings.shape[0]
-            word_embedding_dim = word_embeddings.shape[1]
-
-        self.words_lookup = self.model.add_lookup_parameters((vocab_size, word_embedding_dim), name="we")
-
-        if word_embeddings is not None:
-            self.words_lookup.init_from_array(word_embeddings)
-
         # Char LSTM Parameters
         self.use_char_rnn = use_char_rnn
-        self.char_hidden_dim = hidden_dim
-        if use_char_rnn:
-            self.char_lookup = self.model.add_lookup_parameters((charset_size, char_embedding_dim), name="ce")
-            self.char_bi_lstm = dy.BiRNNBuilder(1, char_embedding_dim, hidden_dim, self.model, dy.LSTMBuilder)
-
-        # Word LSTM parameters
-        if use_char_rnn:
-            input_dim = word_embedding_dim + hidden_dim
+        self.use_elman_rnn = use_elman_rnn
+        assert self.use_char_rnn
+        self.char_lookup = self.model.add_lookup_parameters((charset_size, char_embedding_dim), name="ce")
+        if not self.use_elman_rnn:
+            # print "using char lstm!"
+            logging.info("char bilstm: char_embedding_dim {} hidden {}".format(char_embedding_dim, hidden_dim))
+            # self.char_bi_lstm = dy.BiRNNBuilder(1, char_embedding_dim, hidden_dim, self.model, dy.LSTMBuilder)
+            self.char_bi_lstm = AsymBiRNNBuilder(1, char_embedding_dim, hidden_dim, self.model, dy.LSTMBuilder)
         else:
-            input_dim = word_embedding_dim
-        self.word_bi_lstm = dy.BiRNNBuilder(num_lstm_layers, input_dim, hidden_dim, self.model, dy.LSTMBuilder)
+            raise Exception("should not happen")
+            # print "using char rnn!"
+            self.char_bi_lstm = dy.BiRNNBuilder(1, char_embedding_dim, hidden_dim, self.model, dy.SimpleRNNBuilder)
+
+        if  type(hidden_dim) == int:
+            input_dim = hidden_dim
+        else:
+            input_dim = sum(hidden_dim)
+
+
+
+        logging.info("word bilstm: input_dim {} word_level_dim {}".format(input_dim, word_level_dim))
+        self.word_bi_lstm = dy.BiRNNBuilder(num_lstm_layers, input_dim, word_level_dim, self.model, dy.LSTMBuilder)
 
         # Matrix that maps from Bi-LSTM output to num tags
         self.lstm_to_tags_params = {}
         self.lstm_to_tags_bias = {}
         self.mlp_out = {}
         self.mlp_out_bias = {}
-        for att, set_size in list(tagset_sizes.items()):
-            self.lstm_to_tags_params[att] = self.model.add_parameters((set_size, hidden_dim), name=att+"H")
+        for att, set_size in tagset_sizes.items():
+            self.lstm_to_tags_params[att] = self.model.add_parameters((set_size, word_level_dim), name=att+"H")
             self.lstm_to_tags_bias[att] = self.model.add_parameters(set_size, name=att+"Hb")
             self.mlp_out[att] = self.model.add_parameters((set_size, set_size), name=att+"O")
             self.mlp_out_bias[att] = self.model.add_parameters(set_size, name=att+"Ob")
 
-    def word_rep(self, word, char_ids):
+    def word_rep(self, char_ids):
         '''
         :param word: index of word in lookup table
         '''
-        wemb = dy.lookup(self.words_lookup, word, update=self.we_update)
-        if char_ids is None:
-            return wemb
 
-        # add character representation
+        # only char representation, no word embeddings
         char_embs = [self.char_lookup[cid] for cid in char_ids]
-        char_exprs = self.char_bi_lstm.transduce(char_embs)
-        #char_exprs[-1] contains the final forward hidden state,
-        #but the initial backward hidden state
-        forward = char_exprs[-1][:self.char_hidden_dim // 2]
-        backward = char_exprs[0][self.char_hidden_dim // 2:]
-        return dy.concatenate([wemb, forward, backward])
+        return self.char_bi_lstm.final_hiddens(char_embs)
+        # char_exprs = self.char_bi_lstm.transduce(char_embs)
+        # return dy.concatenate([char_exprs[-1][:self.hidden_dim // 2], char_exprs[0][(self.hidden_dim // 2):]]), char_exprs
 
-    def build_tagging_graph(self, sentence, word_chars):
+    def build_tagging_graph(self, word_chars):
         dy.renew_cg()
 
-        if word_chars == None:
-            embeddings = [self.word_rep(w, None) for w in sentence]
-        else:
-            embeddings = [self.word_rep(w, chars) for w, chars in zip(sentence, word_chars)]
-
+        all_embeddings = [self.word_rep(chars) for chars in word_chars]
+        embeddings, char_embeddings = list(zip(*all_embeddings))
         lstm_out = self.word_bi_lstm.transduce(embeddings)
 
         H = {}
@@ -137,14 +131,14 @@ class LSTMTagger:
                 score_t = O[att] * dy.tanh(H[att] * rep + Hb[att]) + Ob[att]
                 scores[att].append(score_t)
 
-        return scores
+        return scores, char_embeddings
 
-    def loss(self, sentence, word_chars, tags_set):
+    def loss(self, word_chars, tags_set):
         '''
         For use in training phase.
         Tag sentence (all attributes) and compute loss based on probability of expected tags.
         '''
-        observations_set = self.build_tagging_graph(sentence, word_chars)
+        observations_set, _ = self.build_tagging_graph(word_chars)
         errors = {}
         for att, tags in tags_set.items():
             err = []
@@ -158,12 +152,12 @@ class LSTMTagger:
                 err = dy.cmult(err, prop_vec)
         return errors
 
-    def tag_sentence(self, sentence, word_chars):
+    def tag_sentence(self, word_chars):
         '''
         For use in testing phase.
         Tag sentence and return tags for each attribute, without caluclating loss.
         '''
-        observations_set = self.build_tagging_graph(sentence, word_chars)
+        observations_set, char_embeddings = self.build_tagging_graph(word_chars)
         tag_seqs = {}
         for att, observations in observations_set.items():
             observations = [ dy.softmax(obs) for obs in observations ]
@@ -173,7 +167,7 @@ class LSTMTagger:
                 tag_t = np.argmax(prob)
                 tag_seq.append(tag_t)
             tag_seqs[att] = tag_seq
-        return tag_seqs
+        return tag_seqs, char_embeddings
 
     def set_dropout(self, p):
         self.word_bi_lstm.set_dropout(p)
@@ -191,6 +185,59 @@ class LSTMTagger:
         with open(file_name + "-atts", 'w') as attdict:
             attdict.write("\t".join(sorted(self.attributes)))
 
+
+class ProcessedDataset:
+    def __init__(self, dataset_path, training_sentence_size=-1, token_size=-1):
+        dataset = pickle.load(open(dataset_path, "rb"))
+        self.dataset = dataset
+
+        self.w2i = dataset["w2i"]
+        self.t2is = dataset["t2is"]
+        self.c2i = dataset["c2i"]
+        self.i2w = { i: w for w, i in self.w2i.items()} # Inverse mapping
+        self.i2ts = { att: {i: t for t, i in t2i.items()} for att, t2i in self.t2is.items()}
+        self.i2c = { i: c for c, i in self.c2i.items()}
+
+        self.training_instances = dataset["training_instances"]
+        self.training_vocab = dataset["training_vocab"]
+        self.dev_instances = dataset["dev_instances"]
+        self.dev_vocab = dataset["dev_vocab"]
+        self.test_instances = dataset["test_instances"]
+
+        # trim training set for size evaluation (sentence based)
+        if training_sentence_size != -1 and len(self.training_instances) > training_sentence_size:
+            random.shuffle(self.training_instances)
+            self.training_instances = training_instances[:training_sentence_size]
+
+        # trim training set for size evaluation (token based)
+        training_corpus_size = sum(self.training_vocab.values())
+        if token_size != -1 and training_corpus_size > token_size:
+            random.shuffle(self.training_instances)
+            cumulative_tokens = 0
+            cutoff_index = -1
+            for i,inst in enumerate(self.training_instances):
+                cumulative_tokens += len(inst.sentence)
+                if cumulative_tokens >= token_size:
+                    self.training_instances = training_instances[:i+1]
+                    break
+
+        self.tag_set_sizes = {att: len(t2i) for att, t2i in list(self.t2is.items())}
+
+    def get_all_params(self):
+        """
+        Simplify model wrapping
+        """
+        return self.w2i, self.t2is, self.c2i, \
+                self.i2w, self.i2ts, self.i2c, \
+                self.training_instances, self.training_vocab, \
+                self.dev_instances, self.dev_vocab, \
+                self.test_instances, self.tag_set_sizes
+
+    def instance_to_sentence(self, instance):
+        return ' '.join([self.i2w[i] for i in instance.sentence])
+
+
+
 ### END OF CLASSES ###
 
 def get_att_prop(instances):
@@ -199,44 +246,76 @@ def get_att_prop(instances):
     att_counts = Counter()
     for instance in instances:
         total_tokens += len(instance.sentence)
-        for att, tags in list(instance.tags.items()):
+        for att, tags in instance.tags.items():
             t2i = t2is[att]
             att_counts[att] += len([t for t in tags if t != t2i.get(NONE_TAG, -1)])
     return {att:(1.0 - (att_counts[att] / total_tokens)) for att in att_counts}
 
+def normalize(word):
+    if 'http' in word:
+        normalized_words[word] += 1
+        return 'URL'
+    elif '@' in word:
+        normalized_words[word] += 1
+        return 'EMAIL'
+    return word
+
 def get_word_chars(sentence, i2w, c2i):
     pad_char = c2i[PADDING_CHAR]
-    return [[pad_char] + [c2i[c] for c in i2w[word]] + [pad_char] for word in sentence]
+    # return [[pad_char] + [c2i[c] for c in i2w[word]] + [pad_char] for word in sentence]
+    return [[pad_char] + [c2i[c] for c in normalize(i2w[word])] + [pad_char] for word in sentence]
 
 if __name__ == "__main__":
+    print("setting python internal rand seed=1")
+    random.seed(1)
 
     # ===-----------------------------------------------------------------------===
     # Argument parsing
     # ===-----------------------------------------------------------------------===
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", required=True, dest="dataset", help=".pkl file to use")
-    parser.add_argument("--word-embeddings", dest="word_embeddings", help="File from which to read in pretrained embeds (if not supplied, will be random)")
     parser.add_argument("--num-epochs", default=20, dest="num_epochs", type=int, help="Number of full passes through training set (default - 20)")
     parser.add_argument("--num-lstm-layers", default=2, dest="lstm_layers", type=int, help="Number of LSTM layers (default - 2)")
     parser.add_argument("--hidden-dim", default=128, dest="hidden_dim", type=int, help="Size of LSTM hidden layers (default - 128)")
-    parser.add_argument("--training-sentence-size", default=maxsize, dest="training_sentence_size", type=int, help="Instance count of training set (default - unlimited)")
-    parser.add_argument("--token-size", default=maxsize, dest="token_size", type=int, help="Token count of training set (default - unlimited)")
+    parser.add_argument("--word-level-dim", default=None, dest="word_level_dim", type=int, help="Size of the word level LSTM hidden layers (defaults to --hidden-dim)")
+    parser.add_argument("--forward-dim", default = None, dest="forward_dim", type=int, help="Number of forward units in character rnn")
+    parser.add_argument("--backward-dim", default = None, dest="backward_dim", type=int, help="Number of backward units in character rnn")
+    parser.add_argument("--training-sentence-size", default=-1, dest="training_sentence_size", type=int, help="Instance count of training set (default - unlimited)")
+    parser.add_argument("--token-size", default=-1, dest="token_size", type=int, help="Token count of training set (default - unlimited)")
     parser.add_argument("--learning-rate", default=0.01, dest="learning_rate", type=float, help="Initial learning rate (default - 0.01)")
     parser.add_argument("--dropout", default=-1, dest="dropout", type=float, help="Amount of dropout to apply to LSTM part of graph (default - off)")
     parser.add_argument("--no-we-update", dest="no_we_update", action="store_true", help="Word Embeddings aren't updated")
     parser.add_argument("--loss-prop", dest="loss_prop", action="store_true", help="Proportional loss magnitudes")
     parser.add_argument("--use-char-rnn", dest="use_char_rnn", action="store_true", help="Use character RNN (default - off)")
+    parser.add_argument("--use-elman-rnn", dest="use_elman_rnn", action="store_true", help="Use a simple RNN instead of LSTM for char level (default - off)")
     parser.add_argument("--log-dir", default="log", dest="log_dir", help="Directory where to write logs / serialized models")
     parser.add_argument("--no-model", dest="no_model", action="store_true", help="Don't serialize models")
     parser.add_argument("--dynet-mem", help="Ignore this external argument")
     parser.add_argument("--debug", dest="debug", action="store_true", help="Debug mode")
     parser.add_argument("--log-to-stdout", dest="log_to_stdout", action="store_true", help="Log to STDOUT")
+    parser.add_argument("--test", dest="test", action="store_true", help="enable test mode")
+    parser.add_argument("--seed", default=1, type=int, help="dynet random seed")
     options = parser.parse_args()
+
+
+    #validate params
+    print((options.forward_dim, options.backward_dim))
+    if options.forward_dim is not None and options.backward_dim is not None:
+        print("Using asym")
+        options.hidden_dim = (options.forward_dim, options.backward_dim)
+
+    if not options.word_level_dim:
+        if type(options.hidden_dim) == int:
+            options.word_level_dim = options.hidden_dim
+        else:
+            #if we are using an asym bilstm
+            options.word_level_dim = sum(options.hidden_dim)
 
 
     # ===-----------------------------------------------------------------------===
     # Set up logging
     # ===-----------------------------------------------------------------------===
+
     if not os.path.exists(options.log_dir):
         os.mkdir(options.log_dir)
     if options.log_to_stdout:
@@ -249,21 +328,25 @@ if __name__ == "__main__":
     # ===-----------------------------------------------------------------------===
     # Log run parameters
     # ===-----------------------------------------------------------------------===
-
+    logging.info(options)
     logging.info(
     """
     Dataset: {}
-    Pretrained Embeddings: {}
     Num Epochs: {}
-    LSTM: {} layers, {} hidden dim
+    LSTM: {} layers, {} hidden dim, {} word level dim
     Concatenating character LSTM: {}
     Training set size limit: {} sentences or {} tokens
     Initial Learning Rate: {}
     Dropout: {}
     LSTM loss weights proportional to attribute frequency: {}
 
-    """.format(options.dataset, options.word_embeddings, options.num_epochs, options.lstm_layers, options.hidden_dim, options.use_char_rnn, \
+    """.format(options.dataset, options.num_epochs, options.lstm_layers, options.hidden_dim, options.word_level_dim, options.use_char_rnn, \
                options.training_sentence_size, options.token_size, options.learning_rate, options.dropout, options.loss_prop))
+
+    # after reading the seed from options, import dynet and other dynet dependent modules
+    dynet_config.set(random_seed=options.seed)
+    import dynet as dy
+    from AsymBiLSTM import AsymBiRNNBuilder
 
     if options.debug:
         print("DEBUG MODE")
@@ -271,47 +354,18 @@ if __name__ == "__main__":
     # ===-----------------------------------------------------------------------===
     # Read in dataset
     # ===-----------------------------------------------------------------------===
-    with open(options.dataset, 'rb') as f:
-        dataset = pickle.load(f)
-    w2i = dataset["w2i"]
-    t2is = dataset["t2is"]
-    c2i = dataset["c2i"]
-    i2w = { i: w for w, i in list(w2i.items()) } # Inverse mapping
-    i2ts = { att: {i: t for t, i in list(t2i.items())} for att, t2i in list(t2is.items()) }
-    i2c = { i: c for c, i in list(c2i.items()) }
+    processed_dataset = ProcessedDataset(options.dataset,
+                        options.training_sentence_size,
+                        options.token_size)
 
-    training_instances = dataset["training_instances"]
-    training_vocab = dataset["training_vocab"]
-    dev_instances = dataset["dev_instances"]
-    dev_vocab = dataset["dev_vocab"]
-    test_instances = dataset["test_instances"]
-
-    # trim training set for size evaluation (sentence based)
-    if len(training_instances) > options.training_sentence_size:
-        random.shuffle(training_instances)
-        training_instances = training_instances[:options.training_sentence_size]
-
-    # trim training set for size evaluation (token based)
-    training_corpus_size = sum(training_vocab.values())
-    if training_corpus_size > options.token_size:
-        random.shuffle(training_instances)
-        cumulative_tokens = 0
-        cutoff_index = -1
-        for i,inst in enumerate(training_instances):
-            cumulative_tokens += len(inst.sentence)
-            if cumulative_tokens >= options.token_size:
-                training_instances = training_instances[:i+1]
-                break
+    w2i, t2is, c2i, i2w, i2ts, i2c, \
+    training_instances, training_vocab, \
+    dev_instances, dev_vocab, test_instances, tag_set_sizes = processed_dataset.get_all_params()
 
     # ===-----------------------------------------------------------------------===
     # Build model and trainer
     # ===-----------------------------------------------------------------------===
-    if options.word_embeddings is not None:
-        word_embeddings = utils.read_pretrained_embeddings(options.word_embeddings, w2i)
-    else:
-        word_embeddings = None
 
-    tag_set_sizes = { att: len(t2i) for att, t2i in list(t2is.items()) }
 
     if options.loss_prop:
         att_props = get_att_prop(training_instances)
@@ -321,14 +375,16 @@ if __name__ == "__main__":
     model = LSTMTagger(tagset_sizes=tag_set_sizes,
                        num_lstm_layers=options.lstm_layers,
                        hidden_dim=options.hidden_dim,
-                       word_embeddings=word_embeddings,
+                       word_level_dim=options.word_level_dim,
                        no_we_update = options.no_we_update,
                        use_char_rnn=options.use_char_rnn,
+                       use_elman_rnn = options.use_elman_rnn,
                        charset_size=len(c2i),
                        char_embedding_dim=DEFAULT_CHAR_EMBEDDING_SIZE,
                        att_props=att_props,
                        vocab_size=len(w2i),
                        word_embedding_dim=DEFAULT_WORD_EMBEDDING_SIZE)
+
 
     trainer = dy.MomentumSGDTrainer(model.model, options.learning_rate, 0.9)
     logging.info("Training Algorithm: {}".format(type(trainer)))
@@ -365,11 +421,10 @@ if __name__ == "__main__":
                     # 'pad' entire sentence with none tags
                     gold_tags[att] = [t2is[att][NONE_TAG]] * len(instance.sentence)
 
-            word_chars = None if not options.use_char_rnn\
-                                else get_word_chars(instance.sentence, i2w, c2i)
+            word_chars = get_word_chars(instance.sentence, i2w, c2i)
 
             # calculate all losses for sentence
-            loss_exprs = model.loss(instance.sentence, word_chars, gold_tags)
+            loss_exprs = model.loss(word_chars, gold_tags)
             loss_expr = dy.esum(list(loss_exprs.values()))
             loss = loss_expr.scalar_value()
 
@@ -409,13 +464,13 @@ if __name__ == "__main__":
             for instance in bar(d_instances):
                 if len(instance.sentence) == 0: continue
                 gold_tags = instance.tags
-                word_chars = None if not options.use_char_rnn else get_word_chars(instance.sentence, i2w, c2i)
+                word_chars = get_word_chars(instance.sentence, i2w, c2i)
                 for att in model.attributes:
                     if att not in instance.tags:
                         gold_tags[att] = [t2is[att][NONE_TAG]] * len(instance.sentence)
-                losses = model.loss(instance.sentence, word_chars, gold_tags)
+                losses = model.loss(word_chars, gold_tags)
                 total_loss = sum([l.scalar_value() for l in list(losses.values())])
-                out_tags_set = model.tag_sentence(instance.sentence, word_chars)
+                out_tags_set, _ = model.tag_sentence(word_chars)
 
                 gold_strings = utils.morphotag_strings(i2ts, gold_tags)
                 obs_strings = utils.morphotag_strings(i2ts, out_tags_set)
@@ -454,13 +509,13 @@ if __name__ == "__main__":
 
         dev_loss = dev_loss / len(d_instances)
 
-        # log epoch results
         dev_pos_accuracy = (dev_correct[POS_KEY] / dev_total[POS_KEY])
+        # log epoch results
         logging.info("POS Dev Accuracy: {}".format(dev_correct[POS_KEY] / dev_total[POS_KEY]))
         logging.info("POS % OOV accuracy: {}".format((dev_oov_total[POS_KEY] - total_wrong_oov[POS_KEY]) / dev_oov_total[POS_KEY]))
         if total_wrong[POS_KEY] > 0:
             logging.info("POS % Wrong that are OOV: {}".format(total_wrong_oov[POS_KEY] / total_wrong[POS_KEY]))
-        for attr in list(t2is.keys()):
+        for attr in t2is.keys():
             if attr != POS_KEY:
                 logging.info("{} F1: {}".format(attr, f1_eval.mic_f1(att = attr)))
         logging.info("Total attribute F1s: {} micro, {} macro, POS included = {}".format(f1_eval.mic_f1(), f1_eval.mac_f1(), False))
@@ -471,21 +526,27 @@ if __name__ == "__main__":
         logging.info("Dev Loss: {}".format(dev_loss))
         train_dev_cost.add_column([train_loss, dev_loss])
 
+        #after the first epoch, log out the normalized words
+        if epoch == 0:
+            logging.info("Writing {} normalized words".format(len(normalized_words.keys())))
+            with open("{}/normalized_words.txt".format(options.log_dir), 'w') as f:
+                for word, count in normalized_words.most_common():
+                    f.write("{} {}\n".format(word, count))
+
+
+
         if epoch > 1 and epoch % 10 != 0: # leave outputs from epochs 1,10,20, etc.
             old_devout_file_name = "{}/devout_epoch-{:02d}.txt".format(options.log_dir, epoch)
             os.remove(old_devout_file_name)
 
         # write best model by dev pos accuracy in addition to periodic writeouts
         if dev_pos_accuracy > best_dev_pos:
-            logging.info("{:.4f} > {:.4f}, writing new best dev model".format(dev_pos_accuracy * 100,
-                    best_dev_pos * 100))
+            print("{:.4f} > {:.4f}, writing new best dev model".format(dev_pos_accuracy * 100, best_dev_pos * 100))
             best_dev_pos = dev_pos_accuracy
             #remove old best
             if old_best_name:
                 os.remove(old_best_name)
                 os.remove(old_best_name + "-atts")
-
-            # if os.path.ex
 
             new_model_file_name = "{}/best_model_epoch-{:02d}-{:.4f}.bin".format(options.log_dir, epoch + 1, dev_pos_accuracy)
             model.save(new_model_file_name)
@@ -505,7 +566,6 @@ if __name__ == "__main__":
         # epoch loop ends
 
     # evaluate test data (once)
-    #TODO this should be done using the best dev model
     logging.info("\n")
     logging.info("Number test instances: {}".format(len(test_instances)))
     model.disable_dropout()
@@ -527,14 +587,14 @@ if __name__ == "__main__":
             for att in model.attributes:
                 if att not in instance.tags:
                     gold_tags[att] = [t2is[att][NONE_TAG]] * len(instance.sentence)
-            word_chars = word_chars = None if not options.use_char_rnn else get_word_chars(instance.sentence, i2w, c2i)
-            out_tags_set = model.tag_sentence(instance.sentence, word_chars)
+            word_chars = get_word_chars(instance.sentence, i2w, c2i)
+            out_tags_set, _ = model.tag_sentence(word_chars)
 
             gold_strings = utils.morphotag_strings(i2ts, gold_tags)
             obs_strings = utils.morphotag_strings(i2ts, out_tags_set)
             for g, o in zip(gold_strings, obs_strings):
                 f1_eval.add_instance(utils.split_tagstring(g, has_pos=True), utils.split_tagstring(o, has_pos=True))
-            for att, tags in list(gold_tags.items()):
+            for att, tags in gold_tags.items():
                 out_tags = out_tags_set[att]
 
                 oov_strings = []
@@ -565,9 +625,11 @@ if __name__ == "__main__":
     logging.info("POS % Test OOV accuracy: {}".format((test_oov_total[POS_KEY] - total_wrong_oov[POS_KEY]) / test_oov_total[POS_KEY]))
     if total_wrong[POS_KEY] > 0:
         logging.info("POS % Test Wrong that are OOV: {}".format(total_wrong_oov[POS_KEY] / total_wrong[POS_KEY]))
-    for attr in list(t2is.keys()):
+    for attr in t2is.keys():
         if attr != POS_KEY:
             logging.info("{} F1: {}".format(attr, f1_eval.mic_f1(att = attr)))
     logging.info("Total attribute F1s: {} micro, {} macro, POS included = {}".format(f1_eval.mic_f1(), f1_eval.mac_f1(), False))
 
     logging.info("Total test tokens: {}, Total test OOV: {}, % OOV: {}".format(test_total[POS_KEY], test_oov_total[POS_KEY], test_oov_total[POS_KEY] / test_total[POS_KEY]))
+
+
