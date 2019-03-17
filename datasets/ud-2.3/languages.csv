@@ -1,0 +1,24 @@
+ar,Arabic,Strongly suffixing,int
+bg,Bulgarian,Strongly suffixing,fus
+cop,Coptic,Weakly prefixing,agglutinative
+da,Danish,Strongly suffixing,fus
+el,Greek,Strongly suffixing,fus
+en,English,Strongly suffixing,fus
+es,Spanish,Strongly suffixing,fus
+eu,Basque,Equal prefixing and suffixing,agglutinative
+fa,Persian,Weakly suffixing,fus
+ga,Irish,Equal prefixing and suffixing,fus
+he,Hebrew,Weakly suffixing,int
+hi,Hindi,Strongly suffixing,fus
+hu,Hungarian,Strongly suffixing,agglutinative
+id,Indonesian,Strongly suffixing,isolating
+it,Italian,Strongly suffixing,fus
+lv,Latvian,Weakly suffixing,fus
+ru,Russian,Strongly suffixing,fus
+sv,Swedish,Strongly suffixing,fus
+ta,Tamil,Strongly suffixing,agglutinative
+th,Thai,Little affixation,fus
+tr,Turkish,Strongly suffixing,agglutinative
+uk,Ukrainian,Strongly suffixing,fus
+vi,Vietnamese,Little affixation,isolating
+zh,Chinese,Strongly suffixing,isolating
