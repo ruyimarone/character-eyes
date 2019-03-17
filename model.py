@@ -18,7 +18,7 @@ import numpy as np
 
 import utils
 
-__author__ = "Yuval Pinter and Robert Guthrie, 2017"
+__author__ = "Yuval Pinter and Robert Guthrie, 2017. Modified Marc Marone, 2018"
 
 Instance = collections.namedtuple("Instance", ["sentence", "tags"])
 
@@ -187,7 +187,7 @@ class LSTMTagger:
 
 
 class ProcessedDataset:
-    def __init__(self, dataset_path, training_sentence_size=-1, token_size=-1):
+    def __init__(self, dataset_path, training_sentence_size=None, token_size=None):
         dataset = pickle.load(open(dataset_path, "rb"))
         self.dataset = dataset
 
@@ -205,13 +205,13 @@ class ProcessedDataset:
         self.test_instances = dataset["test_instances"]
 
         # trim training set for size evaluation (sentence based)
-        if training_sentence_size != -1 and len(self.training_instances) > training_sentence_size:
+        if training_sentence_size is not None and len(self.training_instances) > training_sentence_size:
             random.shuffle(self.training_instances)
-            self.training_instances = training_instances[:training_sentence_size]
+            self.training_instances = self.training_instances[:training_sentence_size]
 
         # trim training set for size evaluation (token based)
         training_corpus_size = sum(self.training_vocab.values())
-        if token_size != -1 and training_corpus_size > token_size:
+        if token_size is not None and training_corpus_size > token_size:
             random.shuffle(self.training_instances)
             cumulative_tokens = 0
             cutoff_index = -1
@@ -632,4 +632,9 @@ if __name__ == "__main__":
 
     logging.info("Total test tokens: {}, Total test OOV: {}, % OOV: {}".format(test_total[POS_KEY], test_oov_total[POS_KEY], test_oov_total[POS_KEY] / test_total[POS_KEY]))
 
+# imported as a module, not a script
+# so initialize dynet without a seed
+else:
+    import dynet as dy
+    from AsymBiLSTM import AsymBiRNNBuilder
 
