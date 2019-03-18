@@ -67,15 +67,8 @@ class LSTMTagger:
         self.use_elman_rnn = use_elman_rnn
         assert self.use_char_rnn
         self.char_lookup = self.model.add_lookup_parameters((charset_size, char_embedding_dim), name="ce")
-        if not self.use_elman_rnn:
-            # print "using char lstm!"
-            logging.info("char bilstm: char_embedding_dim {} hidden {}".format(char_embedding_dim, hidden_dim))
-            # self.char_bi_lstm = dy.BiRNNBuilder(1, char_embedding_dim, hidden_dim, self.model, dy.LSTMBuilder)
-            self.char_bi_lstm = AsymBiRNNBuilder(1, char_embedding_dim, hidden_dim, self.model, dy.LSTMBuilder)
-        else:
-            raise Exception("should not happen")
-            # print "using char rnn!"
-            self.char_bi_lstm = dy.BiRNNBuilder(1, char_embedding_dim, hidden_dim, self.model, dy.SimpleRNNBuilder)
+        logging.info("char bilstm: char_embedding_dim {} hidden {}".format(char_embedding_dim, hidden_dim))
+        self.char_bi_lstm = AsymBiRNNBuilder(1, char_embedding_dim, hidden_dim, self.model, dy.LSTMBuilder)
 
         if  type(hidden_dim) == int:
             input_dim = hidden_dim
@@ -106,8 +99,6 @@ class LSTMTagger:
         # only char representation, no word embeddings
         char_embs = [self.char_lookup[cid] for cid in char_ids]
         return self.char_bi_lstm.final_hiddens(char_embs)
-        # char_exprs = self.char_bi_lstm.transduce(char_embs)
-        # return dy.concatenate([char_exprs[-1][:self.hidden_dim // 2], char_exprs[0][(self.hidden_dim // 2):]]), char_exprs
 
     def build_tagging_graph(self, word_chars):
         dy.renew_cg()
@@ -116,19 +107,15 @@ class LSTMTagger:
         embeddings, char_embeddings = list(zip(*all_embeddings))
         lstm_out = self.word_bi_lstm.transduce(embeddings)
 
-        H = {}
-        Hb = {}
-        O = {}
-        Ob = {}
         scores = {}
         for att in self.attributes:
-            H[att] = dy.parameter(self.lstm_to_tags_params[att])
-            Hb[att] = dy.parameter(self.lstm_to_tags_bias[att])
-            O[att] = dy.parameter(self.mlp_out[att])
-            Ob[att] = dy.parameter(self.mlp_out_bias[att])
+            H  = self.lstm_to_tags_params[att]
+            Hb = self.lstm_to_tags_bias[att]
+            O = self.mlp_out[att]
+            Ob = self.mlp_out_bias[att]
             scores[att] = []
             for rep in lstm_out:
-                score_t = O[att] * dy.tanh(H[att] * rep + Hb[att]) + Ob[att]
+                score_t = O * dy.tanh(H * rep + Hb) + Ob
                 scores[att].append(score_t)
 
         return scores, char_embeddings
@@ -218,7 +205,7 @@ class ProcessedDataset:
             for i,inst in enumerate(self.training_instances):
                 cumulative_tokens += len(inst.sentence)
                 if cumulative_tokens >= token_size:
-                    self.training_instances = training_instances[:i+1]
+                    self.training_instances = self.training_instances[:i+1]
                     break
 
         self.tag_set_sizes = {att: len(t2i) for att, t2i in list(self.t2is.items())}
@@ -280,8 +267,8 @@ if __name__ == "__main__":
     parser.add_argument("--word-level-dim", default=None, dest="word_level_dim", type=int, help="Size of the word level LSTM hidden layers (defaults to --hidden-dim)")
     parser.add_argument("--forward-dim", default = None, dest="forward_dim", type=int, help="Number of forward units in character rnn")
     parser.add_argument("--backward-dim", default = None, dest="backward_dim", type=int, help="Number of backward units in character rnn")
-    parser.add_argument("--training-sentence-size", default=-1, dest="training_sentence_size", type=int, help="Instance count of training set (default - unlimited)")
-    parser.add_argument("--token-size", default=-1, dest="token_size", type=int, help="Token count of training set (default - unlimited)")
+    parser.add_argument("--training-sentence-size", default=None, dest="training_sentence_size", type=int, help="Instance count of training set (default - unlimited)")
+    parser.add_argument("--token-size", default=None, dest="token_size", type=int, help="Token count of training set (default - unlimited)")
     parser.add_argument("--learning-rate", default=0.01, dest="learning_rate", type=float, help="Initial learning rate (default - 0.01)")
     parser.add_argument("--dropout", default=-1, dest="dropout", type=float, help="Amount of dropout to apply to LSTM part of graph (default - off)")
     parser.add_argument("--no-we-update", dest="no_we_update", action="store_true", help="Word Embeddings aren't updated")
@@ -299,9 +286,8 @@ if __name__ == "__main__":
 
 
     #validate params
-    print((options.forward_dim, options.backward_dim))
     if options.forward_dim is not None and options.backward_dim is not None:
-        print("Using asym")
+        print("Asym parameters set")
         options.hidden_dim = (options.forward_dim, options.backward_dim)
 
     if not options.word_level_dim:
@@ -384,7 +370,6 @@ if __name__ == "__main__":
                        att_props=att_props,
                        vocab_size=len(w2i),
                        word_embedding_dim=DEFAULT_WORD_EMBEDDING_SIZE)
-
 
     trainer = dy.MomentumSGDTrainer(model.model, options.learning_rate, 0.9)
     logging.info("Training Algorithm: {}".format(type(trainer)))
