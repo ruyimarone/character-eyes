@@ -5,11 +5,9 @@ class WrappedTagger:
        Wraps a model and dataset to make post training analysis easier
     """
     def __init__(self, dataset_path, num_lstm_layers, hidden_dim, char_embedding_dim, \
-            word_level_dim = None, use_elman=False):
+            word_level_dim, use_elman=False):
         self.dataset = ProcessedDataset(dataset_path)
 
-        if word_level_dim == None:
-            word_level_dim = 128
 
         self.model = LSTMTagger(tagset_sizes = self.dataset.tag_set_sizes,
                                 num_lstm_layers = num_lstm_layers,
