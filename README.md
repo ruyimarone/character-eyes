@@ -18,3 +18,16 @@ More will be added soon!
 
 
 Much of the code is modified from [Mimick](https://github.com/yuvalpinter/Mimick), a character level system that can replace OOVs or UNKs with learned representations approximating a closed vocabulary set of word embeddings. 
+
+## Citation format
+
+When using our work, please use the following `.bib` entry:
+
+```
+@article{charactereyes,
+  title={Character Eyes: Seeing Language through Character-Level Taggers},
+  author={Pinter, Yuval and Marone, Marc and Eisenstein, Jacob},
+  journal={arXiv preprint arXiv:1903.05041},
+  year={2019}
+}
+```
