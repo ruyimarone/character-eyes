@@ -3,6 +3,8 @@
 Code for our project analyzing character level taggers. This repository is a **work in progress** but contains some of our code and analysis. 
 More will be added soon!
 
+![example activations](images/act_ex.png)
+
 ## Contents
 - `model.py` - A fully character level tagger model, implemented in [DyNet](http://dynet.io/). It has support for **asymmetric** bi-directional RNNs, which we found had performance effects depending on linguistic properties of the language. 
 - Pretrained models for 5 of our 24 languages
