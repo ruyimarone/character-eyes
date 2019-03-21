@@ -68,6 +68,7 @@ class AsymBiRNNBuilder(object):
       for (fb,bb) in self.builder_layers:
         fb.set_dropout(p)
         bb.set_dropout(p)
+
     def disable_dropout(self):
       for (fb,bb) in self.builder_layers:
         fb.disable_dropout()

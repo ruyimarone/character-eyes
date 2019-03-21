@@ -188,7 +188,6 @@ def avg_final_activation(activations, words, fwd_dim=64):
     values = np.array(values)
     return values.mean(axis=0)
 
-
 def average_diff(activations, words):
     values = []
     n_chars = sum(len(w) for w in words)
@@ -200,19 +199,6 @@ def average_diff(activations, words):
     values = np.array(values)
     return values.mean(axis=0)
 
-
-def load_words(filename, filter_len = None):
-    words = []
-    with codecs.open(filename, 'r', encoding='utf-8') as f:
-        for line in f:
-            word = line.strip()
-            if filter_len:
-                if len(word) == filter_len:
-                    words.append(word)
-            else:
-                words.append(word)
-    return words
-
 def equal_resample(*samples):
     min_words = min(len(x) for x in samples)
     outs = []
@@ -220,70 +206,17 @@ def equal_resample(*samples):
         outs.append(list(np.random.choice(sample, min_words, replace=False)))
     return outs
 
-def get_stats_from_name(name):
-    stats = {}
-    parts = name.split('/')
-    just_name = parts[-1]
-    leaf_dir = parts[-2]
-    assert just_name.startswith('best')
-    dir_parts = leaf_dir.split('-')
-    assert len(dir_parts) == 1 or len(dir_parts) == 3
-    stats['ln'] = dir_parts[0]
-    if len(dir_parts) == 1:
-        #we are analyzing a base model
-        stats['base_model'] = True
-        #TODO this is hardcoded
-        stats['hidden_size'] = 128
-    elif len(dir_parts) == 3:
-        stats['base_model'] = False
-        stats['forward'] = int(dir_parts[1])
-        stats['backward'] = int(dir_parts[2])
-    _, epoch, acc = just_name.split('-')
-    stats['epoch'] = int(epoch)
-    #strip off the .bin part
-    stats['accuracy'] = float(acc[:-4])
-    stats['name'] = name
-    return stats
+def get_single_activation(model, word):
+    _, embeddings = model.forward_text(word)
+    activations = embeddings[0][1:-1]
+    activations = np.stack([a.npvalue() for a in activations], axis=1)
+    return activations.T
 
-def load_all_models(base_directory, forward_dim, backward_dim, filter_func=None, languages = None):
-    models = []
-    if filter_func is None:
-        #if a function isn't provided, filter on model names that match dimensions
-        filter_func = lambda x : '{}-{}'.format(forward_dim, backward_dim) in x
-    for d in os.listdir(base_directory):
-        if filter_func and not filter_func(d):
-            continue
-        model_name = get_best_model_name(os.path.join(base_directory, d))
-        stats = get_stats_from_name(model_name)
-        if languages and not stats['ln'] in languages:
-            continue
-        dataset_name = 'datasets/{}_ud23.pkl'.format(stats['ln'])
-        if stats['base_model']:
-            model = WrappedTagger(dataset_name, num_lstm_layers = 2, hidden_dim = 128, char_embedding_dim = 256, word_level_dim = 128)
-        else:
-            model = WrappedTagger(dataset_name, num_lstm_layers = 2, hidden_dim = (stats['forward'], stats['backward']), char_embedding_dim = 256, word_level_dim = 128)
-        model.load_weights(model_name)
-        models.append((model, stats))
-    return models
-
-def get_all_pos(dataset, instances, freq_threshold, unambig_threshold):
-    words_to_tags =  defaultdict(Counter)
-    i2pos = dataset.i2ts['POS']
-    for instance in instances:
-        for word, tag in zip(instance.sentence, instance.tags['POS']):
-            word = dataset.i2w[word]
-            tag = i2pos[tag]
-            words_to_tags[word][tag] += 1
-
-    words = defaultdict(list)
-    for word, tags in words_to_tags.items():
-        count = sum(tags.values())
-
-        if count < freq_threshold:
-            continue
-
-        for tag, tag_count in tags.items():
-            if tag_count / count >= unambig_threshold:
-                words[tag].append(word)
-
-    return words
+def get_head(sorted_values, p_mass = 0.5):
+    """Finds the N values needed to account for a certain amount of "mass"
+    :param sorted_values: inverse sorted (largest to smallest) values
+    :param p_mass: the mass of the head
+    """
+    total = sum(abs(sorted_values))
+    head = p_mass * total
+    return np.argmax(np.cumsum(sorted_values)>=head)
