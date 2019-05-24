@@ -13,7 +13,6 @@ More will be added soon!
 
 ## Coming Soon
 - Interactive Notebooks - play with character level representations on the fly!
-- better dependencies/`requirements.txt`
 - Storage size permitting, more pretrained models including asymmetric configurations
 
 
