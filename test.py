@@ -142,8 +142,7 @@ if __name__ == '__main__':
                 num_lstm_layers = 2,
                 hidden_dim = options.hidden_dim,
                 char_embedding_dim = 256,
-                word_level_dim = options.word_level_dim,
-                use_elman=False)
+                word_level_dim = options.word_level_dim)
 
     model.load_weights(options.model, verbose=True)
 
