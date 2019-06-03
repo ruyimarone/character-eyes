@@ -5,7 +5,7 @@ class WrappedTagger:
        Wraps a model and dataset to make post training analysis easier
     """
     def __init__(self, dataset_path, num_lstm_layers, hidden_dim, char_embedding_dim, \
-            word_level_dim, use_elman=False):
+            word_level_dim):
         self.dataset = ProcessedDataset(dataset_path)
 
 
@@ -13,12 +13,8 @@ class WrappedTagger:
                                 num_lstm_layers = num_lstm_layers,
                                 hidden_dim = hidden_dim,
                                 word_level_dim = word_level_dim,
-                                no_we_update = True, #doesnt matter?
-                                use_char_rnn = True,
                                 charset_size = len(self.dataset.c2i),
                                 char_embedding_dim = char_embedding_dim,
-                                use_elman_rnn = use_elman,
-                                att_props = None,
                                 vocab_size = None,
                                 word_embedding_dim=None)
 
@@ -87,7 +83,7 @@ class WrappedTagger:
 
             #populate target param with source param weights
             param.populate(weights_path, source_name)
-        
+
         self.model.disable_dropout()
 
     def __str__(self):

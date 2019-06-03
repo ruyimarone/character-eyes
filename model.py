@@ -13,6 +13,7 @@ import pickle
 import logging
 import progressbar
 import os
+import sys
 import dynet_config
 import numpy as np
 
@@ -39,33 +40,22 @@ class LSTMTagger:
     https://github.com/clab/dynet_tutorial_examples/blob/master/tutorial_bilstm_tagger.py
     '''
 
-    def __init__(self, tagset_sizes, num_lstm_layers, hidden_dim, word_level_dim, no_we_update, use_char_rnn, charset_size, char_embedding_dim, use_elman_rnn, att_props=None, vocab_size=None, word_embedding_dim=None):
+    def __init__(self, tagset_sizes, num_lstm_layers, hidden_dim, word_level_dim, charset_size, char_embedding_dim, vocab_size=None, word_embedding_dim=None):
         '''
         :param tagset_sizes: dictionary of attribute_name:number_of_possible_tags
         :param num_lstm_layers: number of desired LSTM layers
         :param hidden_dim: size of hidden dimension (same for all LSTM layers, including character-level). If tuple, the char level birnn will be asymmetric with (forward, backward)
         :param word_embeddings: pre-trained list of embeddings, assumes order by word ID (optional)
-        :param no_we_update: if toggled, don't update embeddings
-        :param use_char_rnn: use "char->tag" option, i.e. concatenate character-level LSTM outputs to word representations (and train underlying LSTM). Only 1-layer is supported.
         :param charset_size: number of characters expected in dataset (needed for character embedding initialization)
         :param char_embedding_dim: desired character embedding dimension
-        :param att_props: proportion of loss to assign each attribute for back-propagation weighting (optional)
         :param vocab_size: number of words in model (ignored if pre-trained embeddings are given)
         :param word_embedding_dim: desired word embedding dimension (ignored if pre-trained embeddings are given)
         '''
         self.model = dy.Model()
         self.tagset_sizes = tagset_sizes
         self.attributes = tagset_sizes.keys()
-        self.we_update = not no_we_update
-        if att_props is not None:
-            self.att_props = defaultdict(float, {att:(1.0-p) for att,p in att_props.items()})
-        else:
-            self.att_props = None
 
         # Char LSTM Parameters
-        self.use_char_rnn = use_char_rnn
-        self.use_elman_rnn = use_elman_rnn
-        assert self.use_char_rnn
         self.char_lookup = self.model.add_lookup_parameters((charset_size, char_embedding_dim), name="ce")
         logging.info("char bilstm: char_embedding_dim {} hidden {}".format(char_embedding_dim, hidden_dim))
         self.char_bi_lstm = AsymBiRNNBuilder(1, char_embedding_dim, hidden_dim, self.model, dy.LSTMBuilder)
@@ -133,10 +123,6 @@ class LSTMTagger:
                 err_t = dy.pickneglogsoftmax(obs, tag)
                 err.append(err_t)
             errors[att] = dy.esum(err)
-        if self.att_props is not None:
-            for att, err in errors.items():
-                prop_vec = dy.inputVector([self.att_props[att]] * err.dim()[0])
-                err = dy.cmult(err, prop_vec)
         return errors
 
     def tag_sentence(self, word_chars):
@@ -227,17 +213,6 @@ class ProcessedDataset:
 
 ### END OF CLASSES ###
 
-def get_att_prop(instances):
-    logging.info("Calculating attribute proportions for proportional loss margin or proportional loss magnitude")
-    total_tokens = 0
-    att_counts = Counter()
-    for instance in instances:
-        total_tokens += len(instance.sentence)
-        for att, tags in instance.tags.items():
-            t2i = t2is[att]
-            att_counts[att] += len([t for t in tags if t != t2i.get(NONE_TAG, -1)])
-    return {att:(1.0 - (att_counts[att] / total_tokens)) for att in att_counts}
-
 def normalize(word):
     if 'http' in word:
         normalized_words[word] += 1
@@ -248,8 +223,14 @@ def normalize(word):
     return word
 
 def get_word_chars(sentence, i2w, c2i):
+    """get_word_chars: gets the character index level representation of a sentence,
+    prior to processing with the character level RNN
+
+    :param sentence: a list of word indices
+    :param i2w: index to word mappings
+    :param c2i: character to index mappings
+    """
     pad_char = c2i[PADDING_CHAR]
-    # return [[pad_char] + [c2i[c] for c in i2w[word]] + [pad_char] for word in sentence]
     return [[pad_char] + [c2i[c] for c in normalize(i2w[word])] + [pad_char] for word in sentence]
 
 if __name__ == "__main__":
@@ -271,10 +252,6 @@ if __name__ == "__main__":
     parser.add_argument("--token-size", default=None, dest="token_size", type=int, help="Token count of training set (default - unlimited)")
     parser.add_argument("--learning-rate", default=0.01, dest="learning_rate", type=float, help="Initial learning rate (default - 0.01)")
     parser.add_argument("--dropout", default=-1, dest="dropout", type=float, help="Amount of dropout to apply to LSTM part of graph (default - off)")
-    parser.add_argument("--no-we-update", dest="no_we_update", action="store_true", help="Word Embeddings aren't updated")
-    parser.add_argument("--loss-prop", dest="loss_prop", action="store_true", help="Proportional loss magnitudes")
-    parser.add_argument("--use-char-rnn", dest="use_char_rnn", action="store_true", help="Use character RNN (default - off)")
-    parser.add_argument("--use-elman-rnn", dest="use_elman_rnn", action="store_true", help="Use a simple RNN instead of LSTM for char level (default - off)")
     parser.add_argument("--log-dir", default="log", dest="log_dir", help="Directory where to write logs / serialized models")
     parser.add_argument("--no-model", dest="no_model", action="store_true", help="Don't serialize models")
     parser.add_argument("--dynet-mem", help="Ignore this external argument")
@@ -317,17 +294,24 @@ if __name__ == "__main__":
     logging.info(options)
     logging.info(
     """
-    Dataset: {}
-    Num Epochs: {}
-    LSTM: {} layers, {} hidden dim, {} word level dim
-    Concatenating character LSTM: {}
-    Training set size limit: {} sentences or {} tokens
-    Initial Learning Rate: {}
-    Dropout: {}
-    LSTM loss weights proportional to attribute frequency: {}
+    Dataset: {dataset}
+    Num Epochs: {epochs}
+    LSTM: {layers} layers, {hidden} hidden dim, {word} word level dim
+    Training set size limit: {sent} sentences or {tokes} tokens
+    Initial Learning Rate: {lr}
+    Dropout: {dropout}
 
-    """.format(options.dataset, options.num_epochs, options.lstm_layers, options.hidden_dim, options.word_level_dim, options.use_char_rnn, \
-               options.training_sentence_size, options.token_size, options.learning_rate, options.dropout, options.loss_prop))
+    """.format(
+            dataset=options.dataset,
+            epochs=options.num_epochs,
+            layers=options.lstm_layers,
+            hidden=options.hidden_dim,
+            word=options.word_level_dim,
+            sent=options.training_sentence_size,
+            tokes=options.token_size,
+            lr=options.learning_rate,
+            dropout=options.dropout)
+    )
 
     # after reading the seed from options, import dynet and other dynet dependent modules
     dynet_config.set(random_seed=options.seed)
@@ -353,21 +337,12 @@ if __name__ == "__main__":
     # ===-----------------------------------------------------------------------===
 
 
-    if options.loss_prop:
-        att_props = get_att_prop(training_instances)
-    else:
-        att_props = None
-
     model = LSTMTagger(tagset_sizes=tag_set_sizes,
                        num_lstm_layers=options.lstm_layers,
                        hidden_dim=options.hidden_dim,
                        word_level_dim=options.word_level_dim,
-                       no_we_update = options.no_we_update,
-                       use_char_rnn=options.use_char_rnn,
-                       use_elman_rnn = options.use_elman_rnn,
                        charset_size=len(c2i),
                        char_embedding_dim=DEFAULT_CHAR_EMBEDDING_SIZE,
-                       att_props=att_props,
                        vocab_size=len(w2i),
                        word_embedding_dim=DEFAULT_WORD_EMBEDDING_SIZE)
 
