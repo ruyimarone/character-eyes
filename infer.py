@@ -1,4 +1,5 @@
-from model import LSTMTagger, ProcessedDataset, PADDING_CHAR, get_word_chars
+import model
+from utils import PADDING_CHAR, get_word_chars
 
 class WrappedTagger:
     """WrappedTagger
@@ -6,10 +7,10 @@ class WrappedTagger:
     """
     def __init__(self, dataset_path, num_lstm_layers, hidden_dim, char_embedding_dim, \
             word_level_dim):
-        self.dataset = ProcessedDataset(dataset_path)
+        self.dataset = model.ProcessedDataset(dataset_path)
 
 
-        self.model = LSTMTagger(tagset_sizes = self.dataset.tag_set_sizes,
+        self.model = model.LSTMTagger(tagset_sizes = self.dataset.tag_set_sizes,
                                 num_lstm_layers = num_lstm_layers,
                                 hidden_dim = hidden_dim,
                                 word_level_dim = word_level_dim,

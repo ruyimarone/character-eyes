@@ -2,9 +2,34 @@ import pickle
 import itertools
 import codecs
 import numpy as np
+import collections
 
+Instance = collections.namedtuple("Instance", ["sentence", "tags"])
 NONE_TAG = "<NONE>"
 POS_KEY = "POS"
+PADDING_CHAR = "<*>"
+
+def normalize(word, normalized_words=None):
+    if 'http' in word:
+        if normalized_words is not None:
+            normalized_words[word] += 1
+        return 'URL'
+    elif '@' in word:
+        if normalized_words is not None:
+            normalized_words[word] += 1
+        return 'EMAIL'
+    return word
+
+def get_word_chars(sentence, i2w, c2i, normalized_words=None):
+    """get_word_chars: gets the character index level representation of a sentence,
+    prior to processing with the character level RNN
+
+    :param sentence: a list of word indices
+    :param i2w: index to word mappings
+    :param c2i: character to index mappings
+    """
+    pad_char = c2i[PADDING_CHAR]
+    return [[pad_char] + [c2i[c] for c in normalize(i2w[word], normalized_words)] + [pad_char] for word in sentence]
 
 class CSVLogger:
 
