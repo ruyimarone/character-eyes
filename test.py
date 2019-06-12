@@ -100,7 +100,8 @@ def evaluate_raw(model, instances, t2is, c2i, i2w, i2ts, training_vocab, log_dir
                 'total_tokens' : test_total[POS_KEY],
                 'total_oov' : test_oov_total[POS_KEY],
                 'oov_percent' : test_oov_total[POS_KEY] / test_total[POS_KEY],
-                'loss' : test_loss
+                'loss' : test_loss,
+                'outputs' : test_outputs
             }
 
     return results
@@ -167,5 +168,5 @@ if __name__ == '__main__':
     else:
         raise Exception("Must provide one of --train,dev,test")
 
-    evaluate(model, instances, use_bar=True)
+    print(evaluate(model, instances, use_bar=True))
 
