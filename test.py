@@ -168,5 +168,7 @@ if __name__ == '__main__':
     else:
         raise Exception("Must provide one of --train,dev,test")
 
-    print(evaluate(model, instances, use_bar=True))
+    results = evaluate(model, instances, use_bar=True)
+    del results['outputs']
+    print(results)
 
