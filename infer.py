@@ -15,9 +15,7 @@ class WrappedTagger:
                                 hidden_dim = hidden_dim,
                                 word_level_dim = word_level_dim,
                                 charset_size = len(self.dataset.c2i),
-                                char_embedding_dim = char_embedding_dim,
-                                vocab_size = None,
-                                word_embedding_dim=None)
+                                char_embedding_dim = char_embedding_dim)
 
         self.desc = "WrappedTagger<{}> char:{} word:{}".format(dataset_path, hidden_dim, word_level_dim)
         self.hidden_dim = hidden_dim

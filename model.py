@@ -38,17 +38,16 @@ class LSTMTagger:
     https://github.com/clab/dynet_tutorial_examples/blob/master/tutorial_bilstm_tagger.py
     '''
 
-    def __init__(self, tagset_sizes, num_lstm_layers, hidden_dim, word_level_dim, charset_size, char_embedding_dim, vocab_size=None, word_embedding_dim=None):
+    def __init__(self, tagset_sizes, num_lstm_layers, hidden_dim, word_level_dim, charset_size, char_embedding_dim):
         '''
         :param tagset_sizes: dictionary of attribute_name:number_of_possible_tags
-        :param num_lstm_layers: number of desired LSTM layers
-        :param hidden_dim: size of hidden dimension (same for all LSTM layers, including character-level). If tuple, the char level birnn will be asymmetric with (forward, backward)
-        :param word_embeddings: pre-trained list of embeddings, assumes order by word ID (optional)
+        :param num_lstm_layers: number of layers in the word level LSTM
+        :param hidden_dim: dimension of the character level LSTM. If tuple, the character embedder will be asymmetric.
+        :param word_level_dim: dimension of the word level LSTM
         :param charset_size: number of characters expected in dataset (needed for character embedding initialization)
         :param char_embedding_dim: desired character embedding dimension
-        :param vocab_size: number of words in model (ignored if pre-trained embeddings are given)
-        :param word_embedding_dim: desired word embedding dimension (ignored if pre-trained embeddings are given)
         '''
+
         self.model = dy.Model()
         self.tagset_sizes = tagset_sizes
         self.attributes = tagset_sizes.keys()
@@ -149,7 +148,6 @@ class LSTMTagger:
     def save(self, file_name):
         '''
         Serialize model parameters for future loading and use.
-        TODO change reading in scripts/test_model.py
         '''
         self.model.save(file_name)
 
@@ -320,9 +318,7 @@ if __name__ == "__main__":
                        hidden_dim=options.hidden_dim,
                        word_level_dim=options.word_level_dim,
                        charset_size=len(c2i),
-                       char_embedding_dim=DEFAULT_CHAR_EMBEDDING_SIZE,
-                       vocab_size=len(w2i),
-                       word_embedding_dim=DEFAULT_WORD_EMBEDDING_SIZE)
+                       char_embedding_dim=DEFAULT_CHAR_EMBEDDING_SIZE)
 
     trainer = dy.MomentumSGDTrainer(model.model, options.learning_rate, 0.9)
     logging.info("Training Algorithm: {}".format(type(trainer)))
@@ -419,9 +415,9 @@ if __name__ == "__main__":
 
 
 
-        if epoch > 1 and epoch % 10 != 0: # leave outputs from epochs 1,10,20, etc.
-            old_devout_file_name = "{}/devout_epoch-{:02d}.txt".format(options.log_dir, epoch)
-            os.remove(old_devout_file_name)
+        # if epoch > 1 and epoch % 10 != 0: # leave outputs from epochs 1,10,20, etc.
+            # old_devout_file_name = "{}/devout_epoch-{:02d}.txt".format(options.log_dir, epoch)
+            # os.remove(old_devout_file_name)
 
         # write best model by dev pos accuracy in addition to periodic writeouts
         dev_pos_accuracy = results['pos_acc']
