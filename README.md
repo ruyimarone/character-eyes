@@ -8,7 +8,8 @@ Code for our project analyzing character level taggers, accepted at [BlackboxNLP
 - `model.py` - A fully character level tagger model, implemented in [DyNet](http://dynet.io/). It has support for **asymmetric** bi-directional RNNs, which we found had performance effects depending on linguistic properties of the language. 
 - Pretrained models for 6 of our 24 languages
 - Ready-to-train datasets (from [Univseral Dependencies 2.3](http://universaldependencies.org/)) for all 24 languages
-- [This notebook](https://github.com/ruyimarone/character-eyes/blob/master/PDI.ipynb), which produces some of the figures in our paper and gives an overview of our method and metrics. *This is the best place to start if you want to use our project.*
+- [This notebook](https://github.com/ruyimarone/character-eyes/blob/master/PDI.ipynb), which produces some of the figures in our paper and gives an overview of our method and metrics. **This is the best place to start if you want to use our project.**
+- An [interactive notebook](https://github.com/ruyimarone/character-eyes/blob/master/InteractiveActivations.ipynb) allowing you to visualize the character level activations for our models 
 
 Much of the code is modified from [Mimick](https://github.com/yuvalpinter/Mimick), a character level system that can replace OOVs or UNKs with learned representations approximating a closed vocabulary set of word embeddings. 
 
