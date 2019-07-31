@@ -1,4 +1,3 @@
-from __future__ import division
 import numpy as np
 import json
 import argparse
@@ -6,7 +5,7 @@ import codecs
 import os
 from collections import namedtuple, defaultdict
 from infer import WrappedTagger
-from model import Instance
+from utils import Instance
 
 INTEREST_POSS = ['NOUN']
 ALL_POSS = ['NOUN', 'VERB', 'ADJ', 'ADV', 'ADP', 'AUX', 'CCONJ', 'DET', 'PART', 'PRON', 'SCONJ']

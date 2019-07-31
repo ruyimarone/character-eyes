@@ -1,26 +1,21 @@
-from model import LSTMTagger, ProcessedDataset, PADDING_CHAR, get_word_chars
+import model
+from utils import PADDING_CHAR, get_word_chars
 
 class WrappedTagger:
     """WrappedTagger
        Wraps a model and dataset to make post training analysis easier
     """
     def __init__(self, dataset_path, num_lstm_layers, hidden_dim, char_embedding_dim, \
-            word_level_dim, use_elman=False):
-        self.dataset = ProcessedDataset(dataset_path)
+            word_level_dim):
+        self.dataset = model.ProcessedDataset(dataset_path)
 
 
-        self.model = LSTMTagger(tagset_sizes = self.dataset.tag_set_sizes,
+        self.model = model.LSTMTagger(tagset_sizes = self.dataset.tag_set_sizes,
                                 num_lstm_layers = num_lstm_layers,
                                 hidden_dim = hidden_dim,
                                 word_level_dim = word_level_dim,
-                                no_we_update = True, #doesnt matter?
-                                use_char_rnn = True,
                                 charset_size = len(self.dataset.c2i),
-                                char_embedding_dim = char_embedding_dim,
-                                use_elman_rnn = use_elman,
-                                att_props = None,
-                                vocab_size = None,
-                                word_embedding_dim=None)
+                                char_embedding_dim = char_embedding_dim)
 
         self.desc = "WrappedTagger<{}> char:{} word:{}".format(dataset_path, hidden_dim, word_level_dim)
         self.hidden_dim = hidden_dim
@@ -87,7 +82,7 @@ class WrappedTagger:
 
             #populate target param with source param weights
             param.populate(weights_path, source_name)
-        
+
         self.model.disable_dropout()
 
     def __str__(self):

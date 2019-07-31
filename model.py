@@ -5,6 +5,8 @@ Main application script for tagging parts-of-speech and morphosyntactic tags. Ru
 from collections import Counter
 from _collections import defaultdict
 from evaluate_morphotags import Evaluator
+import AsymBiLSTM
+import test
 
 import collections
 import argparse
@@ -13,18 +15,15 @@ import pickle
 import logging
 import progressbar
 import os
+import sys
 import dynet_config
+import dynet as dy
 import numpy as np
 
 import utils
+from utils import NONE_TAG, POS_KEY, Instance
 
 __author__ = "Yuval Pinter and Robert Guthrie, 2017. Modified Marc Marone, 2018"
-
-Instance = collections.namedtuple("Instance", ["sentence", "tags"])
-
-NONE_TAG = "<NONE>"
-POS_KEY = "POS"
-PADDING_CHAR = "<*>"
 
 DEFAULT_WORD_EMBEDDING_SIZE = 64
 DEFAULT_CHAR_EMBEDDING_SIZE = 256
@@ -39,36 +38,24 @@ class LSTMTagger:
     https://github.com/clab/dynet_tutorial_examples/blob/master/tutorial_bilstm_tagger.py
     '''
 
-    def __init__(self, tagset_sizes, num_lstm_layers, hidden_dim, word_level_dim, no_we_update, use_char_rnn, charset_size, char_embedding_dim, use_elman_rnn, att_props=None, vocab_size=None, word_embedding_dim=None):
+    def __init__(self, tagset_sizes, num_lstm_layers, hidden_dim, word_level_dim, charset_size, char_embedding_dim):
         '''
         :param tagset_sizes: dictionary of attribute_name:number_of_possible_tags
-        :param num_lstm_layers: number of desired LSTM layers
-        :param hidden_dim: size of hidden dimension (same for all LSTM layers, including character-level). If tuple, the char level birnn will be asymmetric with (forward, backward)
-        :param word_embeddings: pre-trained list of embeddings, assumes order by word ID (optional)
-        :param no_we_update: if toggled, don't update embeddings
-        :param use_char_rnn: use "char->tag" option, i.e. concatenate character-level LSTM outputs to word representations (and train underlying LSTM). Only 1-layer is supported.
+        :param num_lstm_layers: number of layers in the word level LSTM
+        :param hidden_dim: dimension of the character level LSTM. If tuple, the character embedder will be asymmetric.
+        :param word_level_dim: dimension of the word level LSTM
         :param charset_size: number of characters expected in dataset (needed for character embedding initialization)
         :param char_embedding_dim: desired character embedding dimension
-        :param att_props: proportion of loss to assign each attribute for back-propagation weighting (optional)
-        :param vocab_size: number of words in model (ignored if pre-trained embeddings are given)
-        :param word_embedding_dim: desired word embedding dimension (ignored if pre-trained embeddings are given)
         '''
+
         self.model = dy.Model()
         self.tagset_sizes = tagset_sizes
         self.attributes = tagset_sizes.keys()
-        self.we_update = not no_we_update
-        if att_props is not None:
-            self.att_props = defaultdict(float, {att:(1.0-p) for att,p in att_props.items()})
-        else:
-            self.att_props = None
 
         # Char LSTM Parameters
-        self.use_char_rnn = use_char_rnn
-        self.use_elman_rnn = use_elman_rnn
-        assert self.use_char_rnn
         self.char_lookup = self.model.add_lookup_parameters((charset_size, char_embedding_dim), name="ce")
         logging.info("char bilstm: char_embedding_dim {} hidden {}".format(char_embedding_dim, hidden_dim))
-        self.char_bi_lstm = AsymBiRNNBuilder(1, char_embedding_dim, hidden_dim, self.model, dy.LSTMBuilder)
+        self.char_bi_lstm = AsymBiLSTM.AsymBiRNNBuilder(1, char_embedding_dim, hidden_dim, self.model, dy.LSTMBuilder)
 
         if  type(hidden_dim) == int:
             input_dim = hidden_dim
@@ -92,11 +79,11 @@ class LSTMTagger:
             self.mlp_out_bias[att] = self.model.add_parameters(set_size, name=att+"Ob")
 
     def word_rep(self, char_ids):
-        '''
-        :param word: index of word in lookup table
-        '''
+        """
+        get the word level representation from a sequnce of character ids
+        """
 
-        # only char representation, no word embeddings
+        # only char representation, no word embeddings!
         char_embs = [self.char_lookup[cid] for cid in char_ids]
         return self.char_bi_lstm.final_hiddens(char_embs)
 
@@ -133,10 +120,6 @@ class LSTMTagger:
                 err_t = dy.pickneglogsoftmax(obs, tag)
                 err.append(err_t)
             errors[att] = dy.esum(err)
-        if self.att_props is not None:
-            for att, err in errors.items():
-                prop_vec = dy.inputVector([self.att_props[att]] * err.dim()[0])
-                err = dy.cmult(err, prop_vec)
         return errors
 
     def tag_sentence(self, word_chars):
@@ -165,7 +148,6 @@ class LSTMTagger:
     def save(self, file_name):
         '''
         Serialize model parameters for future loading and use.
-        TODO change reading in scripts/test_model.py
         '''
         self.model.save(file_name)
 
@@ -227,30 +209,6 @@ class ProcessedDataset:
 
 ### END OF CLASSES ###
 
-def get_att_prop(instances):
-    logging.info("Calculating attribute proportions for proportional loss margin or proportional loss magnitude")
-    total_tokens = 0
-    att_counts = Counter()
-    for instance in instances:
-        total_tokens += len(instance.sentence)
-        for att, tags in instance.tags.items():
-            t2i = t2is[att]
-            att_counts[att] += len([t for t in tags if t != t2i.get(NONE_TAG, -1)])
-    return {att:(1.0 - (att_counts[att] / total_tokens)) for att in att_counts}
-
-def normalize(word):
-    if 'http' in word:
-        normalized_words[word] += 1
-        return 'URL'
-    elif '@' in word:
-        normalized_words[word] += 1
-        return 'EMAIL'
-    return word
-
-def get_word_chars(sentence, i2w, c2i):
-    pad_char = c2i[PADDING_CHAR]
-    # return [[pad_char] + [c2i[c] for c in i2w[word]] + [pad_char] for word in sentence]
-    return [[pad_char] + [c2i[c] for c in normalize(i2w[word])] + [pad_char] for word in sentence]
 
 if __name__ == "__main__":
     print("setting python internal rand seed=1")
@@ -271,10 +229,6 @@ if __name__ == "__main__":
     parser.add_argument("--token-size", default=None, dest="token_size", type=int, help="Token count of training set (default - unlimited)")
     parser.add_argument("--learning-rate", default=0.01, dest="learning_rate", type=float, help="Initial learning rate (default - 0.01)")
     parser.add_argument("--dropout", default=-1, dest="dropout", type=float, help="Amount of dropout to apply to LSTM part of graph (default - off)")
-    parser.add_argument("--no-we-update", dest="no_we_update", action="store_true", help="Word Embeddings aren't updated")
-    parser.add_argument("--loss-prop", dest="loss_prop", action="store_true", help="Proportional loss magnitudes")
-    parser.add_argument("--use-char-rnn", dest="use_char_rnn", action="store_true", help="Use character RNN (default - off)")
-    parser.add_argument("--use-elman-rnn", dest="use_elman_rnn", action="store_true", help="Use a simple RNN instead of LSTM for char level (default - off)")
     parser.add_argument("--log-dir", default="log", dest="log_dir", help="Directory where to write logs / serialized models")
     parser.add_argument("--no-model", dest="no_model", action="store_true", help="Don't serialize models")
     parser.add_argument("--dynet-mem", help="Ignore this external argument")
@@ -317,22 +271,28 @@ if __name__ == "__main__":
     logging.info(options)
     logging.info(
     """
-    Dataset: {}
-    Num Epochs: {}
-    LSTM: {} layers, {} hidden dim, {} word level dim
-    Concatenating character LSTM: {}
-    Training set size limit: {} sentences or {} tokens
-    Initial Learning Rate: {}
-    Dropout: {}
-    LSTM loss weights proportional to attribute frequency: {}
+    Dataset: {dataset}
+    Num Epochs: {epochs}
+    LSTM: {layers} layers, {hidden} hidden dim, {word} word level dim
+    Training set size limit: {sent} sentences or {tokes} tokens
+    Initial Learning Rate: {lr}
+    Dropout: {dropout}
 
-    """.format(options.dataset, options.num_epochs, options.lstm_layers, options.hidden_dim, options.word_level_dim, options.use_char_rnn, \
-               options.training_sentence_size, options.token_size, options.learning_rate, options.dropout, options.loss_prop))
+    """.format(
+            dataset=options.dataset,
+            epochs=options.num_epochs,
+            layers=options.lstm_layers,
+            hidden=options.hidden_dim,
+            word=options.word_level_dim,
+            sent=options.training_sentence_size,
+            tokes=options.token_size,
+            lr=options.learning_rate,
+            dropout=options.dropout)
+    )
 
     # after reading the seed from options, import dynet and other dynet dependent modules
-    dynet_config.set(random_seed=options.seed)
-    import dynet as dy
-    from AsymBiLSTM import AsymBiRNNBuilder
+    print("reseting dynet seed to {}".format(options.seed))
+    dy.reset_random_seed(options.seed)
 
     if options.debug:
         print("DEBUG MODE")
@@ -353,23 +313,12 @@ if __name__ == "__main__":
     # ===-----------------------------------------------------------------------===
 
 
-    if options.loss_prop:
-        att_props = get_att_prop(training_instances)
-    else:
-        att_props = None
-
     model = LSTMTagger(tagset_sizes=tag_set_sizes,
                        num_lstm_layers=options.lstm_layers,
                        hidden_dim=options.hidden_dim,
                        word_level_dim=options.word_level_dim,
-                       no_we_update = options.no_we_update,
-                       use_char_rnn=options.use_char_rnn,
-                       use_elman_rnn = options.use_elman_rnn,
                        charset_size=len(c2i),
-                       char_embedding_dim=DEFAULT_CHAR_EMBEDDING_SIZE,
-                       att_props=att_props,
-                       vocab_size=len(w2i),
-                       word_embedding_dim=DEFAULT_WORD_EMBEDDING_SIZE)
+                       char_embedding_dim=DEFAULT_CHAR_EMBEDDING_SIZE)
 
     trainer = dy.MomentumSGDTrainer(model.model, options.learning_rate, 0.9)
     logging.info("Training Algorithm: {}".format(type(trainer)))
@@ -406,7 +355,7 @@ if __name__ == "__main__":
                     # 'pad' entire sentence with none tags
                     gold_tags[att] = [t2is[att][NONE_TAG]] * len(instance.sentence)
 
-            word_chars = get_word_chars(instance.sentence, i2w, c2i)
+            word_chars = utils.get_word_chars(instance.sentence, i2w, c2i, normalized_words)
 
             # calculate all losses for sentence
             loss_exprs = model.loss(word_chars, gold_tags)
@@ -432,84 +381,30 @@ if __name__ == "__main__":
         train_loss = train_loss / len(train_instances)
 
         # evaluate dev data
-        model.disable_dropout()
-        dev_loss = 0.0
-        dev_correct = Counter()
-        dev_total = Counter()
-        dev_oov_total = Counter()
-        bar = progressbar.ProgressBar()
-        total_wrong = Counter()
-        total_wrong_oov = Counter()
-        f1_eval = Evaluator(m = 'att')
         if options.debug:
             d_instances = dev_instances[0:int(len(dev_instances)/10)]
         else:
             d_instances = dev_instances
-        with open("{}/devout_epoch-{:02d}.txt".format(options.log_dir, epoch + 1), 'w') as dev_writer:
-            for instance in bar(d_instances):
-                if len(instance.sentence) == 0: continue
-                gold_tags = instance.tags
-                word_chars = get_word_chars(instance.sentence, i2w, c2i)
-                for att in model.attributes:
-                    if att not in instance.tags:
-                        gold_tags[att] = [t2is[att][NONE_TAG]] * len(instance.sentence)
-                losses = model.loss(word_chars, gold_tags)
-                total_loss = sum([l.scalar_value() for l in list(losses.values())])
-                out_tags_set, _ = model.tag_sentence(word_chars)
-
-                gold_strings = utils.morphotag_strings(i2ts, gold_tags)
-                obs_strings = utils.morphotag_strings(i2ts, out_tags_set)
-                for g, o in zip(gold_strings, obs_strings):
-                    f1_eval.add_instance(utils.split_tagstring(g, has_pos=True), utils.split_tagstring(o, has_pos=True))
-                for att, tags in list(gold_tags.items()):
-                    out_tags = out_tags_set[att]
-                    correct_sent = True
-
-                    oov_strings = []
-                    for word, gold, out in zip(instance.sentence, tags, out_tags):
-                        if gold == out:
-                            dev_correct[att] += 1
-                        else:
-                            # Got the wrong tag
-                            total_wrong[att] += 1
-                            correct_sent = False
-                            if i2w[word] not in training_vocab:
-                                total_wrong_oov[att] += 1
-
-                        if i2w[word] not in training_vocab:
-                            dev_oov_total[att] += 1
-                            oov_strings.append("OOV")
-                        else:
-                            oov_strings.append("")
-
-                    dev_total[att] += len(tags)
-
-                dev_loss += (total_loss / len(instance.sentence))
-
-                dev_writer.write(("\n"
-                                 + "\n".join(["\t".join(z) for z in zip([i2w[w] for w in instance.sentence],
-                                                                             gold_strings, obs_strings, oov_strings)])
-                                 + "\n"))
-
-
-        dev_loss = dev_loss / len(d_instances)
-
-        dev_pos_accuracy = (dev_correct[POS_KEY] / dev_total[POS_KEY])
-        # log epoch results
-        logging.info("POS Dev Accuracy: {}".format(dev_correct[POS_KEY] / dev_total[POS_KEY]))
-        logging.info("POS % OOV accuracy: {}".format((dev_oov_total[POS_KEY] - total_wrong_oov[POS_KEY]) / dev_oov_total[POS_KEY]))
-        if total_wrong[POS_KEY] > 0:
-            logging.info("POS % Wrong that are OOV: {}".format(total_wrong_oov[POS_KEY] / total_wrong[POS_KEY]))
-        for attr in t2is.keys():
+        model.disable_dropout()
+         # with open("{}/devout_epoch-{:02d}.txt".format(options.log_dir, epoch + 1), 'w') as dev_writer:
+        #todo write things out
+        results = test.evaluate_raw(model, d_instances, t2is, c2i, i2w, i2ts, training_vocab, use_bar=True)
+        logging.info("POS Dev Accuracy: {}".format(results['pos_acc']))
+        logging.info("POS % OOV accuracy: {}".format(results['pos_oov_accuracy']))
+        logging.info("POS % Wrong that are OOV: {}".format(results['pos_wrong_oov']))
+        for attr in results['f1_scores']:
             if attr != POS_KEY:
-                logging.info("{} F1: {}".format(attr, f1_eval.mic_f1(att = attr)))
-        logging.info("Total attribute F1s: {} micro, {} macro, POS included = {}".format(f1_eval.mic_f1(), f1_eval.mac_f1(), False))
+                logging.info("{} F1: {}".format(attr, results['f1_scores'][attr]))
 
-        logging.info("Total dev tokens: {}, Total dev OOV: {}, % OOV: {}".format(dev_total[POS_KEY], dev_oov_total[POS_KEY], dev_oov_total[POS_KEY] / dev_total[POS_KEY]))
+        logging.info("Total attribute F1s: {} micro, {} macro, POS included = {}".format(results['micro_f1'], results['macro_f1'], False))
+
+        logging.info("Total dev tokens: {}, Total dev OOV: {}, % OOV: {}".format(results['total_tokens'],
+            results['total_oov'],
+            results['oov_percent']))
 
         logging.info("Train Loss: {}".format(train_loss))
-        logging.info("Dev Loss: {}".format(dev_loss))
-        train_dev_cost.add_column([train_loss, dev_loss])
+        logging.info("Dev Loss: {}".format(results['loss']))
+        train_dev_cost.add_column([train_loss, results['loss']])
 
         #after the first epoch, log out the normalized words
         if epoch == 0:
@@ -520,11 +415,12 @@ if __name__ == "__main__":
 
 
 
-        if epoch > 1 and epoch % 10 != 0: # leave outputs from epochs 1,10,20, etc.
-            old_devout_file_name = "{}/devout_epoch-{:02d}.txt".format(options.log_dir, epoch)
-            os.remove(old_devout_file_name)
+        # if epoch > 1 and epoch % 10 != 0: # leave outputs from epochs 1,10,20, etc.
+            # old_devout_file_name = "{}/devout_epoch-{:02d}.txt".format(options.log_dir, epoch)
+            # os.remove(old_devout_file_name)
 
         # write best model by dev pos accuracy in addition to periodic writeouts
+        dev_pos_accuracy = results['pos_acc']
         if dev_pos_accuracy > best_dev_pos:
             print("{:.4f} > {:.4f}, writing new best dev model".format(dev_pos_accuracy * 100, best_dev_pos * 100))
             best_dev_pos = dev_pos_accuracy
@@ -551,75 +447,26 @@ if __name__ == "__main__":
         # epoch loop ends
 
     # evaluate test data (once)
+
     logging.info("\n")
     logging.info("Number test instances: {}".format(len(test_instances)))
+
     model.disable_dropout()
-    test_correct = Counter()
-    test_total = Counter()
-    test_oov_total = Counter()
-    bar = progressbar.ProgressBar()
-    total_wrong = Counter()
-    total_wrong_oov = Counter()
-    f1_eval = Evaluator(m = 'att')
     if options.debug:
         t_instances = test_instances[0:int(len(test_instances)/10)]
     else:
         t_instances = test_instances
-    with open("{}/testout.txt".format(options.log_dir), 'w') as test_writer:
-        for instance in bar(t_instances):
-            if len(instance.sentence) == 0: continue
-            gold_tags = instance.tags
-            for att in model.attributes:
-                if att not in instance.tags:
-                    gold_tags[att] = [t2is[att][NONE_TAG]] * len(instance.sentence)
-            word_chars = get_word_chars(instance.sentence, i2w, c2i)
-            out_tags_set, _ = model.tag_sentence(word_chars)
-
-            gold_strings = utils.morphotag_strings(i2ts, gold_tags)
-            obs_strings = utils.morphotag_strings(i2ts, out_tags_set)
-            for g, o in zip(gold_strings, obs_strings):
-                f1_eval.add_instance(utils.split_tagstring(g, has_pos=True), utils.split_tagstring(o, has_pos=True))
-            for att, tags in gold_tags.items():
-                out_tags = out_tags_set[att]
-
-                oov_strings = []
-                for word, gold, out in zip(instance.sentence, tags, out_tags):
-                    if gold == out:
-                        test_correct[att] += 1
-                    else:
-                        # Got the wrong tag
-                        total_wrong[att] += 1
-                        if i2w[word] not in training_vocab:
-                            total_wrong_oov[att] += 1
-
-                    if i2w[word] not in training_vocab:
-                        test_oov_total[att] += 1
-                        oov_strings.append("OOV")
-                    else:
-                        oov_strings.append("")
-
-                test_total[att] += len(tags)
-            test_writer.write(("\n"
-                             + "\n".join(["\t".join(z) for z in zip([i2w[w] for w in instance.sentence],
-                                                                         gold_strings, obs_strings, oov_strings)])
-                             + "\n"))
-
+    results = test.evaluate_raw(model, t_instances, t2is, c2i, i2w, i2ts, training_vocab, use_bar=True)
 
     # log test results
-    logging.info("POS Test Accuracy: {}".format(test_correct[POS_KEY] / test_total[POS_KEY]))
-    logging.info("POS % Test OOV accuracy: {}".format((test_oov_total[POS_KEY] - total_wrong_oov[POS_KEY]) / test_oov_total[POS_KEY]))
-    if total_wrong[POS_KEY] > 0:
-        logging.info("POS % Test Wrong that are OOV: {}".format(total_wrong_oov[POS_KEY] / total_wrong[POS_KEY]))
-    for attr in t2is.keys():
+    logging.info("POS Test Accuracy: {}".format(results['pos_acc']))
+    logging.info("POS % Test OOV accuracy: {}".format(results['pos_oov_accuracy']))
+    logging.info("POS % Test Wrong that are OOV: {}".format(results['pos_wrong_oov']))
+    for attr in results['f1_scores']:
         if attr != POS_KEY:
-            logging.info("{} F1: {}".format(attr, f1_eval.mic_f1(att = attr)))
-    logging.info("Total attribute F1s: {} micro, {} macro, POS included = {}".format(f1_eval.mic_f1(), f1_eval.mac_f1(), False))
+            logging.info("{} F1: {}".format(attr, results['f1_scores'][attr]))
+    logging.info("Total attribute F1s: {} micro, {} macro, POS included = {}".format(results['micro_f1'], results['macro_f1'], False))
 
-    logging.info("Total test tokens: {}, Total test OOV: {}, % OOV: {}".format(test_total[POS_KEY], test_oov_total[POS_KEY], test_oov_total[POS_KEY] / test_total[POS_KEY]))
-
-# imported as a module, not a script
-# so initialize dynet without a seed
-else:
-    import dynet as dy
-    from AsymBiLSTM import AsymBiRNNBuilder
-
+    logging.info("Total test tokens: {}, Total test OOV: {}, % OOV: {}".format(results['total_tokens'],
+        results['total_oov'],
+        results['oov_percent']))
