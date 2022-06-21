@@ -1,5 +1,5 @@
 certifi==2019.3.9
 Cython==0.29.7
 dyNET==2.1
-numpy==1.16.3
+numpy==1.22.0
 progressbar==2.5
